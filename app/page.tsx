@@ -11,15 +11,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2 } from "lucide-react";
+import { Loader2, AlertTriangle } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 import Image from "next/image";
-// import Image from "next/image";
 
 export default function Home() {
   const [url, setUrl] = useState("");
   const [videoInfo, setVideoInfo] = useState<any>(null);
-  const [selectedFormat, setSelectedFormat] = useState("");
+  const [selectedFormat, setSelectedFormat] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleFetchInfo = async () => {
@@ -29,9 +28,10 @@ export default function Home() {
     try {
       const res = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
       const data = await res.json();
+
       if (!data.error) {
         setVideoInfo(data);
-        setSelectedFormat(data.formats[0]?.itag || "");
+        setSelectedFormat(data.formats?.[0]?.itag?.toString() ?? null);
       }
     } catch (error) {
       console.error(error);
@@ -42,10 +42,37 @@ export default function Home() {
 
   const handleDownload = () => {
     if (!url || !selectedFormat) return;
+
     window.open(
       `/api/download?url=${encodeURIComponent(url)}&itag=${selectedFormat}`,
       "_blank"
     );
+  };
+
+  const currentFormat = videoInfo?.formats.find(
+    (f: any) => f.itag.toString() === selectedFormat
+  );
+
+  const formatLabel = (format: any) => {
+    switch (format.type) {
+      case "audio-only":
+        return `🎵 Áudio (${format.container})`;
+      case "video-only":
+        return `🎬 ${format.qualityLabel} (sem áudio)`;
+      case "video+audio":
+        return `🎬 ${format.qualityLabel} (áudio incluso)`;
+      default:
+        return "Formato desconhecido";
+    }
+  };
+
+  const downloadButtonLabel = () => {
+    if (!currentFormat) return "Baixar";
+
+    if (currentFormat.type === "audio-only") return "Baixar Áudio";
+    if (currentFormat.type === "video-only") return "Baixar Vídeo (sem áudio)";
+
+    return "Baixar Vídeo";
   };
 
   return (
@@ -53,6 +80,7 @@ export default function Home() {
       <Card className="w-full max-w-xl">
         <CardContent className="flex flex-col gap-4">
           <h1 className="text-xl font-bold">SaveTube</h1>
+
           <div className="flex flex-col items-center gap-2">
             <Input
               placeholder="Cole o link do YouTube"
@@ -60,6 +88,7 @@ export default function Home() {
               onChange={(e) => setUrl(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleFetchInfo()}
             />
+
             <Button
               className="w-full"
               disabled={loading}
@@ -94,22 +123,45 @@ export default function Home() {
 
                 <Separator />
 
-                <Select>
+                <Select
+                  value={selectedFormat ?? undefined}
+                  onValueChange={setSelectedFormat}
+                >
                   <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Selecione o formato de vídeo desejado ..." />
+                    <SelectValue placeholder="Selecione o formato desejado" />
                   </SelectTrigger>
+
                   <SelectContent>
-                    {videoInfo.formats.map((f: any, i: number) => (
-                      <SelectItem key={i} value={f.itag}>
-                        {f.audioOnly
-                          ? `Áudio (${f.container})`
-                          : `${f.qualityLabel || "Sem vídeo"} (${f.container})`}
+                    {videoInfo.formats.map((format: any) => (
+                      <SelectItem
+                        key={format.itag}
+                        value={format.itag.toString()}
+                      >
+                        <div className="flex justify-between w-full items-center">
+                          <span className="font-medium mr-4">
+                            {formatLabel(format)}
+                          </span>
+
+                          <span className="text-xs text-gray-500 ml-auto">
+                            {format.size ?? "Tamanho desconhecido"}
+                          </span>
+                        </div>
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
 
-                <Button onClick={handleDownload}>Baixar</Button>
+                {currentFormat?.type === "video-only" && (
+                  <div className="flex items-center gap-2 text-xs text-yellow-600">
+                    <AlertTriangle size={14} />
+                    Este formato não contém áudio. Será necessário mux.
+                  </div>
+                )}
+
+                <Button onClick={handleDownload} disabled={!selectedFormat}>
+                  {downloadButtonLabel()}
+                  {currentFormat?.size ? ` (${currentFormat.size})` : ""}
+                </Button>
               </div>
             </>
           )}
