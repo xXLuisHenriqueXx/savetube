@@ -1,100 +1,67 @@
 import { NextRequest } from "next/server";
-import ytdl from "@distube/ytdl-core";
-
-const agent = ytdl.createAgent();
-
-function sanitizeFilename(name: string) {
-  return name.replace(/[^a-zA-Z0-9\s-]/g, "").trim();
-}
-
-function pickBestFormat(formats: any[]) {
-  return formats.reduce((best, current) => {
-    if (!best) return current;
-
-    if (best.contentLength && !current.contentLength) return best;
-    if (!best.contentLength && current.contentLength) return current;
-
-    if (best.contentLength && current.contentLength) {
-      return Number(current.contentLength) >= Number(best.contentLength)
-        ? current
-        : best;
-    }
-
-    if (best.averageBitrate && current.averageBitrate) {
-      return current.averageBitrate >= best.averageBitrate ? current : best;
-    }
-
-    return current.bitrate >= best.bitrate ? current : best;
-  }, null);
-}
+import { extractVideoId, fetchPlayerResponse } from "@/lib/youtube";
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const videoUrl = searchParams.get("url");
-  const itag = searchParams.get("itag");
+  const params = new URL(req.url).searchParams;
+  const url = params.get("url");
+  const itag = params.get("itag");
 
-  if (!videoUrl || !ytdl.validateURL(videoUrl)) {
-    return new Response(JSON.stringify({ error: "URL inválida" }), {
-      status: 400,
-    });
+  if (!url || !itag) {
+    return Response.json({ error: "URL e itag obrigatórios" }, { status: 400 });
   }
 
-  if (!itag) {
-    return new Response(JSON.stringify({ error: "ITAG obrigatório" }), {
-      status: 400,
-    });
-  }
+  const videoId = extractVideoId(url);
+  if (!videoId)
+    return Response.json({ error: "URL inválida" }, { status: 400 });
 
   try {
-    const info = await ytdl.getInfo(videoUrl, { agent });
+    const player = await fetchPlayerResponse(videoId);
 
-    const candidates = info.formats.filter((f) => f.itag.toString() === itag);
+    const allFormats = [
+      ...(player.streamingData?.formats ?? []),
+      ...(player.streamingData?.adaptiveFormats ?? []),
+    ];
 
-    if (candidates.length === 0) {
-      return new Response(JSON.stringify({ error: "Formato não encontrado" }), {
-        status: 400,
-      });
+    const format = allFormats.find(
+      (f: any) => f.itag.toString() === itag && f.url,
+    );
+
+    if (!format) {
+      return Response.json(
+        { error: "Formato não encontrado" },
+        { status: 400 },
+      );
     }
 
-    const format = pickBestFormat(candidates);
+    const upstream = await fetch(format.url);
+    if (!upstream.ok || !upstream.body) {
+      return Response.json(
+        { error: "Falha ao buscar stream" },
+        { status: 502 },
+      );
+    }
 
-    const title = sanitizeFilename(info.videoDetails.title);
+    const title = (player.videoDetails?.title ?? "video")
+      .replace(/[^a-zA-Z0-9\s-]/g, "")
+      .trim();
 
-    let type: "video+audio" | "video-only" | "audio-only";
-    if (format.hasVideo && format.hasAudio) type = "video+audio";
-    else if (format.hasVideo) type = "video-only";
-    else type = "audio-only";
+    const isAudio = !(format.mimeType ?? "").includes("video/");
+    const filename = isAudio ? `${title}.m4a` : `${title}.mp4`;
 
-    const extension = type === "audio-only" ? "m4a" : format.container || "mp4";
-
-    const filename =
-      type === "audio-only"
-        ? `${title}.audio.${extension}`
-        : `${title}.${extension}`;
-
-    const stream = ytdl(videoUrl, {
-      format,
-      agent,
+    return new Response(upstream.body, {
+      headers: {
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Content-Type": format.mimeType ?? "application/octet-stream",
+        ...(format.contentLength && {
+          "Content-Length": format.contentLength.toString(),
+        }),
+      },
     });
-
-    const headers = new Headers({
-      "Content-Disposition": `attachment; filename="${filename}"`,
-      "Content-Type": format.mimeType || "application/octet-stream",
-      "X-Stream-Type": type,
-      ...(format.contentLength && {
-        "Content-Length": format.contentLength,
-      }),
-    });
-
-    return new Response(stream as any, { headers });
-  } catch (error) {
-    console.error("[YTDL_DOWNLOAD_ERROR]", error);
-
-    return new Response(
-      JSON.stringify({
-        error: "Erro ao iniciar o download (YouTube bloqueou a requisição)",
-      }),
-      { status: 500 }
+  } catch (error: any) {
+    console.error("[DOWNLOAD_ERROR]", error?.message);
+    return Response.json(
+      { error: "Erro ao iniciar download" },
+      { status: 500 },
     );
   }
 }

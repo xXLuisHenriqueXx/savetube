@@ -1,150 +1,100 @@
 import { NextRequest } from "next/server";
-import ytdl from "@distube/ytdl-core";
+import { extractVideoId, fetchPlayerResponse } from "@/lib/youtube";
 
-function formatBytes(bytes?: string | number | null): string | null {
-  if (!bytes) return null;
-
-  const size = Number(bytes);
-  if (!Number.isFinite(size) || size <= 0) return null;
-
+function formatBytes(bytes?: number | null): string | null {
+  if (!bytes || bytes <= 0) return null;
   const units = ["B", "KB", "MB", "GB"];
-  let value = size;
-  let unitIndex = 0;
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
+  let value = bytes,
+    i = 0;
+  while (value >= 1024 && i < units.length - 1) {
     value /= 1024;
-    unitIndex++;
+    i++;
   }
-
-  return `${value.toFixed(2)} ${units[unitIndex]}`;
-}
-
-function getResolution(label?: string): number | null {
-  if (!label) return null;
-  const match = label.match(/^(\d+)p/);
-  return match ? Number(match[1]) : null;
-}
-
-function formatKey(f: any): string {
-  return [
-    f.itag,
-    f.container,
-    f.qualityLabel ?? "audio",
-    f.fps ?? 0,
-    f.hasVideo,
-    f.hasAudio,
-  ].join("|");
-}
-
-function pickBetter(a: any, b: any): any {
-  if (a.contentLength && !b.contentLength) return a;
-  if (!a.contentLength && b.contentLength) return b;
-
-  if (a.contentLength && b.contentLength) {
-    return Number(a.contentLength) >= Number(b.contentLength) ? a : b;
-  }
-
-  if (a.averageBitrate && b.averageBitrate) {
-    return a.averageBitrate >= b.averageBitrate ? a : b;
-  }
-
-  return a.bitrate >= b.bitrate ? a : b;
+  return `${value.toFixed(2)} ${units[i]}`;
 }
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const videoUrl = searchParams.get("url");
+  const url = new URL(req.url).searchParams.get("url");
+  if (!url) return Response.json({ error: "URL obrigatória" }, { status: 400 });
 
-  if (!videoUrl || !ytdl.validateURL(videoUrl)) {
-    return new Response(JSON.stringify({ error: "URL inválida" }), {
-      status: 400,
-    });
-  }
+  const videoId = extractVideoId(url);
+  if (!videoId)
+    return Response.json({ error: "URL inválida" }, { status: 400 });
 
   try {
-    const info = await ytdl.getInfo(videoUrl);
+    const player = await fetchPlayerResponse(videoId);
 
-    const allowedResolutions = [360, 480, 720];
-    const formatMap = new Map<string, any>();
-
-    for (const f of info.formats) {
-      if (!f.hasVideo && !f.hasAudio) continue;
-
-      if (f.container !== "mp4") continue;
-
-      const resolution = getResolution(f.qualityLabel);
-
-      if (f.hasVideo) {
-        if (!resolution || !allowedResolutions.includes(resolution)) {
-          continue;
-        }
-      }
-
-      const key = formatKey(f);
-      const existing = formatMap.get(key);
-
-      if (!existing) {
-        formatMap.set(key, f);
-      } else {
-        formatMap.set(key, pickBetter(existing, f));
-      }
+    if (player.playabilityStatus?.status !== "OK") {
+      return Response.json(
+        { error: player.playabilityStatus?.reason ?? "Vídeo indisponível" },
+        { status: 400 },
+      );
     }
 
-    const formats = Array.from(formatMap.values())
-      .map((f) => {
-        const resolution = getResolution(f.qualityLabel);
+    const allFormats = [
+      ...(player.streamingData?.formats ?? []),
+      ...(player.streamingData?.adaptiveFormats ?? []),
+    ];
 
-        let type: "video+audio" | "video-only" | "audio-only";
+    const ALLOWED_RESOLUTIONS = [360, 480, 720];
 
-        if (f.hasVideo && f.hasAudio) type = "video+audio";
-        else if (f.hasVideo) type = "video-only";
-        else type = "audio-only";
+    const formats = allFormats
+      .filter((f: any) => {
+        if (!f.url) return false; // sem URL direta = precisaria de decipher, descarta
+        const mime: string = f.mimeType ?? "";
+        return mime.includes("video/mp4") || mime.includes("audio/mp4");
+      })
+      .map((f: any) => {
+        const hasVideo = (f.mimeType ?? "").includes("video/");
+        const hasAudio = !!f.audioQuality;
+        const type =
+          hasVideo && hasAudio
+            ? "video+audio"
+            : hasVideo
+              ? "video-only"
+              : "audio-only";
+
+        const resolution = f.qualityLabel ? parseInt(f.qualityLabel) : null;
 
         return {
           itag: f.itag,
           type,
-          hasVideo: f.hasVideo,
-          hasAudio: f.hasAudio,
+          hasVideo,
+          hasAudio,
           qualityLabel: f.qualityLabel ?? null,
           resolution,
           fps: f.fps ?? null,
           width: f.width ?? null,
           height: f.height ?? null,
-          audioBitrate: f.audioBitrate ?? null,
-          container: f.container,
-          mimeType: f.mimeType,
-          size: formatBytes(f.contentLength),
-          contentLength: f.contentLength ?? null,
+          container: "mp4",
+          size: formatBytes(f.contentLength ? Number(f.contentLength) : null),
+          contentLength: f.contentLength ? Number(f.contentLength) : null,
         };
       })
-      .sort((a, b) => {
-        if (a.hasVideo !== b.hasVideo) {
-          return a.hasVideo ? -1 : 1;
-        }
-
+      .filter(
+        (f: any) =>
+          !f.hasVideo ||
+          !f.resolution ||
+          ALLOWED_RESOLUTIONS.includes(f.resolution),
+      )
+      .sort((a: any, b: any) => {
+        if (a.hasVideo !== b.hasVideo) return a.hasVideo ? -1 : 1;
         return (b.resolution ?? 0) - (a.resolution ?? 0);
       });
 
-    return new Response(
-      JSON.stringify({
-        title: info.videoDetails.title,
-        author: info.videoDetails.author?.name ?? null,
-        durationSeconds: Number(info.videoDetails.lengthSeconds),
-        thumbnail: info.videoDetails.thumbnails?.at(-1)?.url ?? null,
-        formats,
-      }),
-      {
-        headers: { "Content-Type": "application/json" },
-      }
-    );
-  } catch (error) {
-    console.error("[YTDL_ERROR]", error);
+    const details = player.videoDetails;
 
-    return new Response(
-      JSON.stringify({
-        error: "Erro ao buscar informações do vídeo",
-      }),
-      { status: 500 }
-    );
+    return Response.json({
+      title: details?.title ?? "Sem título",
+      author: details?.author ?? null,
+      durationSeconds: details?.lengthSeconds
+        ? Number(details.lengthSeconds)
+        : null,
+      thumbnail: details?.thumbnail?.thumbnails?.at(-1)?.url ?? null,
+      formats,
+    });
+  } catch (error: any) {
+    console.error("[INFO_ERROR]", error?.message, error?.stack);
+    return Response.json({ error: "Erro ao buscar vídeo" }, { status: 500 });
   }
 }

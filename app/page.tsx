@@ -20,21 +20,24 @@ export default function Home() {
   const [videoInfo, setVideoInfo] = useState<any>(null);
   const [selectedFormat, setSelectedFormat] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleFetchInfo = async () => {
     if (!url) return;
 
     setLoading(true);
+    setError(null);
     try {
       const res = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
       const data = await res.json();
 
-      if (!data.error) {
-        setVideoInfo(data);
-        setSelectedFormat(data.formats?.[0]?.itag?.toString() ?? null);
+      if (data.error || !res.ok) {
+        setError(data.error ?? "Erro desconhecido");
+        return;
       }
-    } catch (error) {
-      console.error(error);
+      setVideoInfo(data);
+    } catch {
+      setError("Falha de conexão");
     } finally {
       setLoading(false);
     }
@@ -45,12 +48,12 @@ export default function Home() {
 
     window.open(
       `/api/download?url=${encodeURIComponent(url)}&itag=${selectedFormat}`,
-      "_blank"
+      "_blank",
     );
   };
 
   const currentFormat = videoInfo?.formats.find(
-    (f: any) => f.itag.toString() === selectedFormat
+    (f: any) => f.itag.toString() === selectedFormat,
   );
 
   const formatLabel = (format: any) => {
